@@ -393,7 +393,6 @@ elif menu == "⚖️ Custo Médio vs. Reposição":
     gap_val = total_spot - total_medio
     gap_pct = (gap_val / total_medio) * 100.0
 
-    # Cards Visuais de Resumo em HTML
     st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
     c_m1, c_m2, c_m3, c_m4 = st.columns(4)
     with c_m1:
@@ -638,10 +637,17 @@ elif menu == "🌪️ Matriz de Sensibilidade (What-If)":
         columns=[f"Milho {m:+d}%" for m in var_milho]
     )
 
-    st.dataframe(
-        df_stress.style.format("R$ {:,.2f}").background_gradient(cmap="YlOrRd"),
-        use_container_width=True
-    )
+    # Renderização segura da tabela (funciona mesmo se matplotlib estiver compilando)
+    try:
+        st.dataframe(
+            df_stress.style.format("R$ {:,.2f}").background_gradient(cmap="YlOrRd"),
+            use_container_width=True
+        )
+    except Exception:
+        st.dataframe(
+            df_stress.style.format("R$ {:,.2f}"),
+            use_container_width=True
+        )
 
     # Botão de Exportação Excel
     excel_buf = io.BytesIO()
