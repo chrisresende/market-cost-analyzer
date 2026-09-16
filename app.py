@@ -1,21 +1,28 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
 import os
 import sys
+from pathlib import Path
 
-# Garante a importação correta da pasta src em qualquer ambiente
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Adiciona tanto a raiz quanto a pasta src no sys.path de forma absoluta
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+
+for path in [str(ROOT_DIR), str(SRC_DIR)]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# Imports agora usando o caminho das pastas
-from src.config import COMMODITY_TICKERS
-from src.integrations.market_apis import MarketDataService
-from src.calculations.cost_engine import FeedCostEngine
-
+# Import tolerante (funciona tanto com 'src.' quanto direto da pasta)
+try:
+    from src.config import COMMODITY_TICKERS
+    from src.integrations.market_apis import MarketDataService
+    from src.calculations.cost_engine import FeedCostEngine
+except ModuleNotFoundError:
+    from config import COMMODITY_TICKERS
+    from integrations.market_apis import MarketDataService
+    from calculations.cost_engine import FeedCostEngine
 # Configuração da página
 st.set_page_config(
     page_title="Market Cost Analyzer | Nutrição Animal",
