@@ -1,22 +1,17 @@
-import os
-import sys
+import io
+import sqlite3
 from pathlib import Path
-
-ROOT_DIR = Path(__file__).resolve().parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import List
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import requests
+import yfinance as yf
 
-from src.core.models import RawMaterialItem, ProductionParameters
-from src.database.repository import MarketRepository
-from src.services.market_collector import ResilientMarketCollector
-from src.services.cost_calculator import IndustrialCostEngine
-from src.services.exporter import ExcelReportService
-
-# Configuração de Página
+# 1. Configuração de Tela (Deve ser o primeiro comando Streamlit)
 st.set_page_config(
     page_title="Market Cost Analyzer | Nutrição Animal",
     page_icon="🌾",
@@ -24,7 +19,180 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Inicialização de Serviços
+# =====================================================================
+# CAMADA DE DOMÍNIO: Dataclasses & Contratos
+# =====================================================================
+@dataclass
+class MarketQuote:
+    ticker: str
+    name: str
+    price: float
+    change_pct: float
+    currency: str = "BRL"
+    timestamp: datetime = field(default_factory=datetime.now)
+
+@dataclass
+class RawMaterialItem:
+    name: str
+    inclusion_pct: float
+    unit_price: float
+    currency: str = "BRL"
+    category: str = "Macro"
+
+@dataclass
+class ProductionParameters:
+    freight_inbound_ton: float = 85.0
+    packaging_cost_ton: float = 35.0
+    packaging_loss_pct: float = 0.8
+    industrial_cif_ton: float = 115.0
+    moisture_loss_pct: float = 1.2
+
+@dataclass
+class CostBreakdownResult:
+    total_cost_ton: float
+    cost_bag_40kg: float
+    cost_bag_25kg: float
+    raw_material_cost_ton: float
+    freight_total_ton: float
+    packaging_total_ton: float
+    industrial_cif_ton: float
+    process_loss_cost_ton: float
+    items_breakdown: List[dict]
+
+# =====================================================================
+# CAMADA DE ENGENHARIA DE DADOS: Repositório SQLite Local
+# =====================================================================
+class MarketRepository:
+    def __init__(self, db_path: str = "market_history.db"):
+        self.db_path = Path(db_path)
+        self._init_db()
+
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS market_quotes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    currency TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(date, ticker)
+                )
+            """)
+            conn.commit()
+
+    def save_quote(self, ticker: str, name: str, price: float, currency: str = "BRL"):
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO market_quotes (date, ticker, name, price, currency)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(date, ticker) DO UPDATE SET price=excluded.price
+                """, (today, ticker, name, price, currency))
+                conn.commit()
+        except Exception:
+            pass
+
+# =====================================================================
+# CAMADA DE SERVIÇOS: Coleta com Resiliência e Fallback
+# =====================================================================
+class ResilientMarketCollector:
+    def __init__(self, repo: MarketRepository):
+        self.repo = repo
+
+    def get_currencies(self) -> dict:
+        url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
+        try:
+            resp = requests.get(url, timeout=3)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            usd_val = float(data["USDBRL"]["bid"])
+            eur_val = float(data["EURBRL"]["bid"])
+            
+            self.repo.save_quote("USD-BRL", "Dólar Comercial", usd_val, "BRL")
+            self.repo.save_quote("EUR-BRL", "Euro Comercial", eur_val, "BRL")
+            
+            return {
+                "USD": MarketQuote("USD-BRL", "Dólar Comercial", usd_val, float(data["USDBRL"]["pctChange"])),
+                "EUR": MarketQuote("EUR-BRL", "Euro Comercial", eur_val, float(data["EURBRL"]["pctChange"]))
+            }
+        except Exception:
+            return {
+                "USD": MarketQuote("USD-BRL", "Dólar (Ref)", 5.45, 0.0),
+                "EUR": MarketQuote("EUR-BRL", "Euro (Ref)", 5.95, 0.0)
+            }
+
+    def get_commodity_quote(self, ticker: str, name: str, default_price: float) -> MarketQuote:
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period="5d")
+            if not hist.empty and len(hist) >= 2:
+                close = float(hist["Close"].iloc[-1])
+                prev = float(hist["Close"].iloc[-2])
+                pct = ((close - prev) / prev) * 100
+                self.repo.save_quote(ticker, name, close)
+                return MarketQuote(ticker, name, close, pct)
+        except Exception:
+            pass
+        return MarketQuote(ticker, f"{name} (Ref)", default_price, 0.0)
+
+# =====================================================================
+# CAMADA DE REGRAS DE NEGÓCIO: Motor de Custo Agroindustrial
+# =====================================================================
+class IndustrialCostEngine:
+    @staticmethod
+    def calculate(
+        items: List[RawMaterialItem],
+        params: ProductionParameters,
+        usd_rate: float
+    ) -> CostBreakdownResult:
+        breakdown = []
+        raw_mat_sum = 0.0
+
+        for item in items:
+            rate = usd_rate if item.currency == "USD" else 1.0
+            price_brl_kg = item.unit_price * rate
+            cost_ton = price_brl_kg * (item.inclusion_pct / 100.0) * 1000.0
+            raw_mat_sum += cost_ton
+            
+            breakdown.append({
+                "Ingrediente": item.name,
+                "Categoria": item.category,
+                "Inclusão (%)": item.inclusion_pct,
+                "Preço Unit. (R$/kg)": round(price_brl_kg, 3),
+                "Custo R$/ton": round(cost_ton, 2)
+            })
+
+        process_loss_cost = raw_mat_sum * (params.moisture_loss_pct / 100.0)
+        packaging_total = params.packaging_cost_ton * (1.0 + (params.packaging_loss_pct / 100.0))
+        
+        total_ton = (
+            raw_mat_sum 
+            + process_loss_cost 
+            + params.freight_inbound_ton 
+            + packaging_total 
+            + params.industrial_cif_ton
+        )
+
+        return CostBreakdownResult(
+            total_cost_ton=round(total_ton, 2),
+            cost_bag_40kg=round((total_ton / 1000.0) * 40.0, 2),
+            cost_bag_25kg=round((total_ton / 1000.0) * 25.0, 2),
+            raw_material_cost_ton=round(raw_mat_sum, 2),
+            freight_total_ton=round(params.freight_inbound_ton, 2),
+            packaging_total_ton=round(packaging_total, 2),
+            industrial_cif_ton=round(params.industrial_cif_ton, 2),
+            process_loss_cost_ton=round(process_loss_cost, 2),
+            items_breakdown=breakdown
+        )
+
+# =====================================================================
+# CAMADA FULL-STACK: Interface Streamlit por Abas
+# =====================================================================
 @st.cache_resource
 def init_services():
     repo = MarketRepository()
@@ -33,7 +201,6 @@ def init_services():
 
 repo, collector = init_services()
 
-# Coleta de Dados em Cache (10 minutos)
 @st.cache_data(ttl=600, show_spinner="Sincronizando cotações do agronegócio...")
 def get_live_data():
     currencies = collector.get_currencies()
@@ -44,11 +211,11 @@ def get_live_data():
 
 currencies, milho, soja, brent = get_live_data()
 
-# Header Executivo
+# Header
 st.title("🌾 Plataforma de Inteligência de Custos Agroindustriais")
 st.caption("Visão Integrada de Mercado, Volatilidade de Commodities e Custo Unitário de Formulação")
 
-# Barra Lateral: Parâmetros Globais de Fábrica
+# Sidebar: Parâmetros Fabris
 with st.sidebar:
     st.header("⚙️ Parâmetros Fabris")
     freight = st.number_input("Frete Inbound Médio (R$/ton)", 0.0, 500.0, 85.0, 5.0)
@@ -65,35 +232,28 @@ params = ProductionParameters(
     industrial_cif_ton=cif
 )
 
-# Navegação por Abas
+# Abas Executivas
 tab1, tab2, tab3 = st.tabs([
     "📊 Cockpit de Mercado", 
     "🧪 Engenharia de Custos & Formulação", 
     "📈 Análise de Sensibilidade & Exportação"
 ])
 
-# -------------------------------------------------------------
-# ABA 1: COCKPIT DE MERCADO
-# -------------------------------------------------------------
+# ABA 1: MERCADO
 with tab1:
     st.subheader("Indicadores Macroeconômicos e de Commodities")
     c1, c2, c3, c4 = st.columns(4)
-    
     c1.metric(currencies["USD"].name, f"R$ {currencies['USD'].price:.4f}", f"{currencies['USD'].change_pct:.2f}%")
     c2.metric(currencies["EUR"].name, f"R$ {currencies['EUR'].price:.4f}", f"{currencies['EUR'].change_pct:.2f}%")
     c3.metric(milho.name, f"R$ {milho.price:.2f}", f"{milho.change_pct:.2f}%")
     c4.metric(brent.name, f"US$ {brent.price:.2f}", f"{brent.change_pct:.2f}%")
-    
     st.divider()
     st.info("💡 **Dica do Analista:** Variações no Petróleo Brent antecipam oscilações no custo de diesel da tabela de frete ANP em aproximadamente 15 a 21 dias.")
 
-# -------------------------------------------------------------
-# ABA 2: FORMULAÇÃO & ENGENHARIA DE CUSTOS
-# -------------------------------------------------------------
+# ABA 2: FORMULAÇÃO
 with tab2:
     st.subheader("Composição da Ficha Técnica (BOM)")
     
-    # Ficha padrão inicial
     if "recipe_df" not in st.session_state:
         st.session_state.recipe_df = pd.DataFrame([
             {"ingrediente": "Milho Moído Fino", "categoria": "Macro", "inclusao_pct": 58.0, "preco_kg": 1.18, "moeda": "BRL"},
@@ -118,7 +278,6 @@ with tab2:
         }
     )
     
-    # Conversão para objetos de domínio
     items = [
         RawMaterialItem(
             name=row["ingrediente"],
@@ -130,14 +289,12 @@ with tab2:
         for _, row in edited_recipe.iterrows() if pd.notna(row["ingrediente"])
     ]
     
-    # Validação do fechamento
     total_inc = sum(i.inclusion_pct for i in items)
     if abs(total_inc - 100.0) > 0.01:
-        st.warning(f"⚠️ A inclusão total atual é de **{total_inc:.2f}%**. O fechamento padrão da batelada é 100%.")
+        st.warning(f"⚠️ A inclusão total está em **{total_inc:.2f}%**. O padrão de fechamento é 100.00%.")
     else:
         st.success("✅ Fechamento de fórmula conferido (100.00%).")
     
-    # Cálculo
     calc_result = IndustrialCostEngine.calculate(items, params, currencies["USD"].price)
     
     st.markdown("### Síntese de Custos Fabris")
@@ -147,7 +304,6 @@ with tab2:
     m3.metric("Custo Saca 25 kg", f"R$ {calc_result.cost_bag_25kg:,.2f}")
     m4.metric("Matérias-Primas (CPV)", f"R$ {calc_result.raw_material_cost_ton:,.2f}")
 
-    # Gráfico de Pareto/Distribuição
     col_g1, col_g2 = st.columns([3, 2])
     with col_g1:
         fig_pie = px.pie(
@@ -172,9 +328,7 @@ with tab2:
         fig_bar = px.bar(df_costs, x="Etapa", y="Custo (R$/ton)", title="Formação Completa do Custo Unitário", text_auto=True)
         st.plotly_chart(fig_bar, use_container_width=True)
 
-# -------------------------------------------------------------
-# ABA 3: SENSIBILIDADE E EXPORTAÇÃO
-# -------------------------------------------------------------
+# ABA 3: SENSIBILIDADE & EXCEL
 with tab3:
     st.subheader("Simulação de Estresse (What-If)")
     st.write("Simule como choques de oferta e câmbio afetam a margem sem alterar a fórmula base:")
@@ -183,7 +337,6 @@ with tab3:
     shock_corn = s_col1.slider("Choque no Preço do Milho (%)", -30, 30, 0, 5)
     shock_fx = s_col2.slider("Choque no Câmbio USD (%)", -20, 20, 0, 5)
     
-    # Aplica choque em cópia temporária
     stressed_items = []
     for it in items:
         item_copy = RawMaterialItem(it.name, it.inclusion_pct, it.unit_price, it.currency, it.category)
@@ -204,12 +357,30 @@ with tab3:
     
     st.divider()
     st.subheader("📥 Exportação Executiva")
-    st.write("Baixe a planilha estruturada com todas as memórias de cálculo para apresentação:")
+    st.write("Baixe a planilha estruturada para reuniões de precificação:")
     
-    excel_file = ExcelReportService.generate_executive_sheet(calc_result, params)
+    # Geração do arquivo Excel em memória
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        df_summary = pd.DataFrame({
+            "Métrica Operacional": [
+                "Custo Total por Tonelada", "Custo por Saca (40 kg)", "Custo por Saca (25 kg)",
+                "Subtotal Matérias-Primas", "Quebra de Processo / Umidade", "Frete Inbound Médio",
+                "Embalagens (+ perdas)", "CIF / GGF Industrial"
+            ],
+            "Valor (R$)": [
+                calc_result.total_cost_ton, calc_result.cost_bag_40kg, calc_result.cost_bag_25kg,
+                calc_result.raw_material_cost_ton, calc_result.process_loss_cost_ton,
+                calc_result.freight_total_ton, calc_result.packaging_total_ton, calc_result.industrial_cif_ton
+            ]
+        })
+        df_summary.to_excel(writer, sheet_name="Resumo Gerencial", index=False)
+        pd.DataFrame(calc_result.items_breakdown).to_excel(writer, sheet_name="Ficha Técnica (BOM)", index=False)
+    
+    excel_buffer.seek(0)
     st.download_button(
         label="📊 Baixar Relatório em Excel (.xlsx)",
-        data=excel_file,
+        data=excel_buffer,
         file_name="relatorio_custos_nutricao_animal.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
