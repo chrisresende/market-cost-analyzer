@@ -2,167 +2,214 @@ import os
 import sys
 from pathlib import Path
 
-# Garante a resolução dos caminhos do repositório
 ROOT_DIR = Path(__file__).resolve().parent
-SRC_DIR = ROOT_DIR / "src"
-
-for p in [str(ROOT_DIR), str(SRC_DIR)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# Configuração da página (primeiro comando visual do Streamlit)
+from src.core.models import RawMaterialItem, ProductionParameters
+from src.database.repository import MarketRepository
+from src.services.market_collector import ResilientMarketCollector
+from src.services.cost_calculator import IndustrialCostEngine
+from src.services.exporter import ExcelReportService
+
+# Configuração de Página
 st.set_page_config(
     page_title="Market Cost Analyzer | Nutrição Animal",
     page_icon="🌾",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Imports tolerantes para carregar os módulos em qualquer layout de pastas
-try:
-    from src.integrations.market_apis import MarketDataService
-except ModuleNotFoundError:
-    try:
-        from src.market_apis import MarketDataService
-    except ModuleNotFoundError:
-        from market_apis import MarketDataService
+# Inicialização de Serviços
+@st.cache_resource
+def init_services():
+    repo = MarketRepository()
+    collector = ResilientMarketCollector(repo)
+    return repo, collector
 
-try:
-    from src.calculations.cost_engine import FeedCostEngine
-except ModuleNotFoundError:
-    try:
-        from src.cost_engine import FeedCostEngine
-    except ModuleNotFoundError:
-        from cost_engine import FeedCostEngine
+repo, collector = init_services()
 
-try:
-    from src.config import COMMODITY_TICKERS
-except ModuleNotFoundError:
-    try:
-        from config import COMMODITY_TICKERS
-    except ModuleNotFoundError:
-        COMMODITY_TICKERS = {
-            "Milho B3": "CCM=F",
-            "Petróleo Brent": "BZ=F",
-        }
+# Coleta de Dados em Cache (10 minutos)
+@st.cache_data(ttl=600, show_spinner="Sincronizando cotações do agronegócio...")
+def get_live_data():
+    currencies = collector.get_currencies()
+    milho = collector.get_commodity_quote("CCM=F", "Milho B3", 64.20)
+    soja = collector.get_commodity_quote("ZS=F", "Soja CBOT", 102.50)
+    brent = collector.get_commodity_quote("BZ=F", "Petróleo Brent", 79.50)
+    return currencies, milho, soja, brent
 
-# Header da aplicação
-st.title("🌾 Market Cost Analyzer — Nutrição Animal")
-st.caption("Painel automatizado de monitoramento de mercado e custos de formulação")
+currencies, milho, soja, brent = get_live_data()
 
-# Cache para requisições de mercado
-@st.cache_data(ttl=600, show_spinner="Atualizando cotações de mercado...")
-def fetch_indicators():
-    currencies = MarketDataService.get_currency_rates()
-    commodities = {}
-    for name, ticker in COMMODITY_TICKERS.items():
-        try:
-            df = MarketDataService.get_commodity_history(ticker, period="1mo")
-            commodities[name] = df
-        except Exception:
-            commodities[name] = pd.DataFrame()
-    return currencies, commodities
+# Header Executivo
+st.title("🌾 Plataforma de Inteligência de Custos Agroindustriais")
+st.caption("Visão Integrada de Mercado, Volatilidade de Commodities e Custo Unitário de Formulação")
 
-# Carga com fallback para garantir inicialização sem falhas
-try:
-    currencies, commodities = fetch_indicators()
-except Exception:
-    currencies = {"usd_rate": 5.45, "usd_pct": 0.0, "eur_rate": 5.95, "eur_pct": 0.0, "timestamp": "Offline (Padrão)"}
-    commodities = {}
+# Barra Lateral: Parâmetros Globais de Fábrica
+with st.sidebar:
+    st.header("⚙️ Parâmetros Fabris")
+    freight = st.number_input("Frete Inbound Médio (R$/ton)", 0.0, 500.0, 85.0, 5.0)
+    pkg_cost = st.number_input("Custo Base Embalagem (R$/ton)", 0.0, 200.0, 35.0, 2.0)
+    pkg_loss = st.slider("Perda Operacional no Ensaque (%)", 0.0, 5.0, 0.8, 0.1)
+    process_loss = st.slider("Quebra de Processo / Secagem (%)", 0.0, 5.0, 1.2, 0.1)
+    cif = st.number_input("GGF / CIF Industrial (R$/ton)", 0.0, 500.0, 115.0, 10.0)
 
-# KPIs de Mercado
-col1, col2, col3, col4 = st.columns(4)
+params = ProductionParameters(
+    freight_inbound_ton=freight,
+    packaging_cost_ton=pkg_cost,
+    packaging_loss_pct=pkg_loss,
+    moisture_loss_pct=process_loss,
+    industrial_cif_ton=cif
+)
 
-usd_val = currencies.get("usd_rate", 5.45)
-usd_pct = currencies.get("usd_pct", 0.0)
-eur_val = currencies.get("eur_rate", 5.95)
-eur_pct = currencies.get("eur_pct", 0.0)
-
-col1.metric("Dólar Comercial (USD)", f"R$ {usd_val:.4f}", f"{usd_pct:.2f}%")
-col2.metric("Euro Comercial (EUR)", f"R$ {eur_val:.4f}", f"{eur_pct:.2f}%")
-
-# Milho B3
-milho_df = commodities.get("Milho B3", pd.DataFrame())
-if isinstance(milho_df, pd.DataFrame) and not milho_df.empty and "Close" in milho_df.columns:
-    last_close = milho_df["Close"].iloc[-1]
-    prev_close = milho_df["Close"].iloc[-2] if len(milho_df) > 1 else last_close
-    delta = ((last_close - prev_close) / prev_close) * 100
-    col3.metric("Milho B3 (CCM=F)", f"R$ {last_close:.2f}", f"{delta:.2f}%")
-else:
-    col3.metric("Milho B3 (CCM=F)", "R$ 62.50", "Ref. Spot")
-
-# Petróleo Brent
-brent_df = commodities.get("Petróleo Brent", pd.DataFrame())
-if isinstance(brent_df, pd.DataFrame) and not brent_df.empty and "Close" in brent_df.columns:
-    last_brent = brent_df["Close"].iloc[-1]
-    col4.metric("Petróleo Brent", f"US$ {last_brent:.2f}")
-else:
-    col4.metric("Petróleo Brent", "US$ 78.00", "Ref. Spot")
-
-st.divider()
-
-# Barra Lateral: Parâmetros Operacionais
-st.sidebar.header("⚙️ Parâmetros Operacionais")
-freight_inbound = st.sidebar.number_input("Frete Inbound Médio (R$/ton)", min_value=0.0, value=85.0, step=5.0)
-packaging_loss = st.sidebar.slider("Perda Operacional Ensaque (%)", min_value=0.0, max_value=5.0, value=0.8, step=0.1)
-cif_industrial = st.sidebar.number_input("GGF / CIF Industrial (R$/ton)", min_value=0.0, value=110.0, step=10.0)
-
-# Ficha Técnica Padrão
-st.subheader("📋 Simulação de Custo por Ficha Técnica")
-st.write("Edite as matérias-primas e percentuais de inclusão abaixo:")
-
-default_recipe = pd.DataFrame([
-    {"ingrediente": "Milho Moído", "inclusao_pct": 58.0, "preco_base_kg": 1.15, "moeda": "BRL", "custo_embalagem_ton": 35.0},
-    {"ingrediente": "Farelo de Soja 46%", "inclusao_pct": 28.0, "preco_base_kg": 2.10, "moeda": "BRL", "custo_embalagem_ton": 35.0},
-    {"ingrediente": "Farinha de Carne e Ossos", "inclusao_pct": 5.0, "preco_base_kg": 1.85, "moeda": "BRL", "custo_embalagem_ton": 35.0},
-    {"ingrediente": "Óleo Vegetal Degomado", "inclusao_pct": 2.5, "preco_base_kg": 4.80, "moeda": "BRL", "custo_embalagem_ton": 35.0},
-    {"ingrediente": "Premix Vitamínico/Mineral", "inclusao_pct": 4.0, "preco_base_kg": 14.50, "moeda": "BRL", "custo_embalagem_ton": 35.0},
-    {"ingrediente": "Aminoácidos Essenciais (USD)", "inclusao_pct": 2.5, "preco_base_kg": 4.20, "moeda": "USD", "custo_embalagem_ton": 35.0},
+# Navegação por Abas
+tab1, tab2, tab3 = st.tabs([
+    "📊 Cockpit de Mercado", 
+    "🧪 Engenharia de Custos & Formulação", 
+    "📈 Análise de Sensibilidade & Exportação"
 ])
 
-edited_df = st.data_editor(
-    default_recipe,
-    num_rows="dynamic",
-    use_container_width=True,
-    column_config={
-        "ingrediente": "Ingrediente",
-        "inclusao_pct": st.column_config.NumberColumn("Inclusão (%)", min_value=0.0, max_value=100.0, step=0.5),
-        "preco_base_kg": st.column_config.NumberColumn("Preço Base (R$/kg)", min_value=0.0, format="R$ %.3f"),
-        "moeda": st.column_config.SelectboxColumn("Moeda", options=["BRL", "USD"]),
-        "custo_embalagem_ton": st.column_config.NumberColumn("Embalagem (R$/ton)", min_value=0.0, format="R$ %.2f"),
-    }
-)
+# -------------------------------------------------------------
+# ABA 1: COCKPIT DE MERCADO
+# -------------------------------------------------------------
+with tab1:
+    st.subheader("Indicadores Macroeconômicos e de Commodities")
+    c1, c2, c3, c4 = st.columns(4)
+    
+    c1.metric(currencies["USD"].name, f"R$ {currencies['USD'].price:.4f}", f"{currencies['USD'].change_pct:.2f}%")
+    c2.metric(currencies["EUR"].name, f"R$ {currencies['EUR'].price:.4f}", f"{currencies['EUR'].change_pct:.2f}%")
+    c3.metric(milho.name, f"R$ {milho.price:.2f}", f"{milho.change_pct:.2f}%")
+    c4.metric(brent.name, f"US$ {brent.price:.2f}", f"{brent.change_pct:.2f}%")
+    
+    st.divider()
+    st.info("💡 **Dica do Analista:** Variações no Petróleo Brent antecipam oscilações no custo de diesel da tabela de frete ANP em aproximadamente 15 a 21 dias.")
 
-# Validação do Fechamento de Fórmula
-total_pct = edited_df["inclusao_pct"].sum()
-if abs(total_pct - 100.0) > 0.01:
-    st.warning(f"⚠️ A soma da inclusão está em **{total_pct:.1f}%**. O fechamento padrão de fórmula é 100.0%.")
+# -------------------------------------------------------------
+# ABA 2: FORMULAÇÃO & ENGENHARIA DE CUSTOS
+# -------------------------------------------------------------
+with tab2:
+    st.subheader("Composição da Ficha Técnica (BOM)")
+    
+    # Ficha padrão inicial
+    if "recipe_df" not in st.session_state:
+        st.session_state.recipe_df = pd.DataFrame([
+            {"ingrediente": "Milho Moído Fino", "categoria": "Macro", "inclusao_pct": 58.0, "preco_kg": 1.18, "moeda": "BRL"},
+            {"ingrediente": "Farelo de Soja 46%", "categoria": "Macro", "inclusao_pct": 27.5, "preco_kg": 2.15, "moeda": "BRL"},
+            {"ingrediente": "Farinha de Vísceras Aves", "categoria": "Macro", "inclusao_pct": 5.5, "preco_kg": 2.60, "moeda": "BRL"},
+            {"ingrediente": "Óleo de Soja Degomado", "categoria": "Macro", "inclusao_pct": 2.5, "preco_kg": 4.95, "moeda": "BRL"},
+            {"ingrediente": "Núcleo Mineral/Vitamínico", "categoria": "Premix", "inclusao_pct": 4.0, "preco_kg": 14.20, "moeda": "BRL"},
+            {"ingrediente": "L-Lisina HCL (USD)", "categoria": "Aditivo", "inclusao_pct": 1.5, "preco_kg": 2.30, "moeda": "USD"},
+            {"ingrediente": "DL-Metionina (USD)", "categoria": "Aditivo", "inclusao_pct": 1.0, "preco_kg": 3.85, "moeda": "USD"},
+        ])
+    
+    edited_recipe = st.data_editor(
+        st.session_state.recipe_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "ingrediente": "Ingrediente / Matéria-Prima",
+            "categoria": st.column_config.SelectboxColumn("Categoria", options=["Macro", "Micro", "Premix", "Aditivo"]),
+            "inclusao_pct": st.column_config.NumberColumn("Inclusão (%)", min_value=0.0, max_value=100.0, step=0.1, format="%.2f%%"),
+            "preco_kg": st.column_config.NumberColumn("Preço Unitário (por kg)", min_value=0.0, format="R$ %.3f"),
+            "moeda": st.column_config.SelectboxColumn("Moeda", options=["BRL", "USD"])
+        }
+    )
+    
+    # Conversão para objetos de domínio
+    items = [
+        RawMaterialItem(
+            name=row["ingrediente"],
+            inclusion_pct=row["inclusao_pct"],
+            unit_price=row["preco_kg"],
+            currency=row["moeda"],
+            category=row["categoria"]
+        )
+        for _, row in edited_recipe.iterrows() if pd.notna(row["ingrediente"])
+    ]
+    
+    # Validação do fechamento
+    total_inc = sum(i.inclusion_pct for i in items)
+    if abs(total_inc - 100.0) > 0.01:
+        st.warning(f"⚠️ A inclusão total atual é de **{total_inc:.2f}%**. O fechamento padrão da batelada é 100%.")
+    else:
+        st.success("✅ Fechamento de fórmula conferido (100.00%).")
+    
+    # Cálculo
+    calc_result = IndustrialCostEngine.calculate(items, params, currencies["USD"].price)
+    
+    st.markdown("### Síntese de Custos Fabris")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Custo Final / Tonelada", f"R$ {calc_result.total_cost_ton:,.2f}")
+    m2.metric("Custo Saca 40 kg", f"R$ {calc_result.cost_bag_40kg:,.2f}")
+    m3.metric("Custo Saca 25 kg", f"R$ {calc_result.cost_bag_25kg:,.2f}")
+    m4.metric("Matérias-Primas (CPV)", f"R$ {calc_result.raw_material_cost_ton:,.2f}")
 
-# Cálculo do Custo Unitário
-result = FeedCostEngine.calculate_batch_cost(
-    edited_df,
-    usd_rate=usd_val,
-    freight_per_ton=freight_inbound,
-    packaging_loss_pct=packaging_loss,
-    cif_industrial_per_ton=cif_industrial
-)
+    # Gráfico de Pareto/Distribuição
+    col_g1, col_g2 = st.columns([3, 2])
+    with col_g1:
+        fig_pie = px.pie(
+            calc_result.items_breakdown,
+            names="Ingrediente",
+            values="Custo R$/ton",
+            title="Distribuição do Custo de Insumos por Tonelada",
+            hole=0.45
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    with col_g2:
+        df_costs = pd.DataFrame({
+            "Etapa": ["Matérias-Primas", "Frete Inbound", "Embalagens", "CIF Industrial", "Quebra Térmica"],
+            "Custo (R$/ton)": [
+                calc_result.raw_material_cost_ton,
+                calc_result.freight_total_ton,
+                calc_result.packaging_total_ton,
+                calc_result.industrial_cif_ton,
+                calc_result.process_loss_cost_ton
+            ]
+        })
+        fig_bar = px.bar(df_costs, x="Etapa", y="Custo (R$/ton)", title="Formação Completa do Custo Unitário", text_auto=True)
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-# Exibição dos Resultados
-st.markdown("### 📊 Síntese de Custos")
-res1, res2, res3 = st.columns(3)
-res1.metric("Custo Total / Tonelada", f"R$ {result['custo_total_ton']:,.2f}")
-res2.metric("Custo Saca 40 kg", f"R$ {result['custo_saca_40kg']:,.2f}")
-res3.metric("Custo Saca 25 kg", f"R$ {result['custo_saca_25kg']:,.2f}")
-
-# Gráfico de Distribuição do Custo de Matérias-Primas
-fig = px.pie(
-    result["breakdown_df"],
-    names="ingrediente",
-    values="custo_ingrediente_ton",
-    title="Composição do Custo de Matéria-Prima por Tonelada",
-    hole=0.4
-)
-st.plotly_chart(fig, use_container_width=True)
+# -------------------------------------------------------------
+# ABA 3: SENSIBILIDADE E EXPORTAÇÃO
+# -------------------------------------------------------------
+with tab3:
+    st.subheader("Simulação de Estresse (What-If)")
+    st.write("Simule como choques de oferta e câmbio afetam a margem sem alterar a fórmula base:")
+    
+    s_col1, s_col2 = st.columns(2)
+    shock_corn = s_col1.slider("Choque no Preço do Milho (%)", -30, 30, 0, 5)
+    shock_fx = s_col2.slider("Choque no Câmbio USD (%)", -20, 20, 0, 5)
+    
+    # Aplica choque em cópia temporária
+    stressed_items = []
+    for it in items:
+        item_copy = RawMaterialItem(it.name, it.inclusion_pct, it.unit_price, it.currency, it.category)
+        if "Milho" in it.name:
+            item_copy.unit_price *= (1 + shock_corn / 100.0)
+        stressed_items.append(item_copy)
+    
+    stressed_usd = currencies["USD"].price * (1 + shock_fx / 100.0)
+    stressed_res = IndustrialCostEngine.calculate(stressed_items, params, stressed_usd)
+    
+    diff_ton = stressed_res.total_cost_ton - calc_result.total_cost_ton
+    st.metric(
+        "Custo Estressado por Tonelada",
+        f"R$ {stressed_res.total_cost_ton:,.2f}",
+        delta=f"R$ {diff_ton:,.2f} ({((diff_ton)/calc_result.total_cost_ton)*100:+.2f}%)",
+        delta_color="inverse"
+    )
+    
+    st.divider()
+    st.subheader("📥 Exportação Executiva")
+    st.write("Baixe a planilha estruturada com todas as memórias de cálculo para apresentação:")
+    
+    excel_file = ExcelReportService.generate_executive_sheet(calc_result, params)
+    st.download_button(
+        label="📊 Baixar Relatório em Excel (.xlsx)",
+        data=excel_file,
+        file_name="relatorio_custos_nutricao_animal.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
