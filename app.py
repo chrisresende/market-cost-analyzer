@@ -12,7 +12,7 @@ from datetime import datetime
 # CONFIGURAÇÃO DE TELA E METADADOS
 # ==============================================================================
 st.set_page_config(
-    page_title="AgroCost Hub | Inteligência de Custos",
+    page_title="AgroCost Hub | Inteligência em Nutrição Animal",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -30,14 +30,12 @@ st.markdown("""
         color: #1e293b;
     }
 
-    /* Container Principal */
     .main .block-container {
         padding-top: 1.5rem;
         padding-bottom: 2.5rem;
         max-width: 96%;
     }
 
-    /* Top Bar & Branding */
     .top-header {
         background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 50%, #047857 100%);
         padding: 24px 30px;
@@ -81,15 +79,14 @@ st.markdown("""
         box-shadow: 0 0 8px #10b981;
     }
 
-    /* Cards Executivos de KPIs */
     .kpi-card {
         background: #ffffff;
         border: 1px solid #e2e8f0;
         border-radius: 14px;
-        padding: 18px 20px;
+        padding: 16px 18px;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         transition: transform 0.2s ease, box-shadow 0.2s ease;
-        margin-bottom: 15px;
+        margin-bottom: 12px;
         border-top: 4px solid #047857;
     }
     .kpi-card:hover {
@@ -97,31 +94,30 @@ st.markdown("""
         box-shadow: 0 12px 20px -3px rgba(0, 0, 0, 0.08);
     }
     .kpi-label {
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.5px;
         color: #64748b;
-        margin-bottom: 6px;
-    }
-    .kpi-value {
-        font-size: 26px;
-        font-weight: 800;
-        color: #0f172a;
         margin-bottom: 4px;
     }
+    .kpi-value {
+        font-size: 22px;
+        font-weight: 800;
+        color: #0f172a;
+        margin-bottom: 2px;
+    }
     .kpi-delta-pos {
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 600;
         color: #059669;
     }
     .kpi-delta-neg {
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 600;
         color: #dc2626;
     }
 
-    /* Cards de Síntese de Custo */
     .cost-box {
         background: linear-gradient(145deg, #ffffff 0%, #f8fafc 100%);
         border: 1px solid #cbd5e1;
@@ -135,7 +131,6 @@ st.markdown("""
         border: 2px solid #059669;
     }
 
-    /* Sidebar Styling */
     section[data-testid="stSidebar"] {
         background: #0f172a !important;
     }
@@ -149,16 +144,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# PIPELINE DE DADOS: APIS PÚBLICAS
+# PIPELINE DE DADOS: MACRO, MERCADO FUTURO E COMMODITIES
 # ==============================================================================
 @st.cache_data(ttl=900, show_spinner=False)
 def get_macro_indicators():
     data = {
         "usd": 5.42, "usd_pct": 0.15,
         "eur": 5.92, "eur_pct": -0.10,
-        "ipca_12m": 4.10, "igpm_12m": 2.80,
+        "ipca_12m": 4.10, "selic_meta": 10.50,
         "updated_at": datetime.now().strftime("%d/%m/%Y %H:%M")
     }
+    # AwesomeAPI - Moedas
     try:
         r = requests.get("https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL", timeout=3)
         if r.status_code == 200:
@@ -171,44 +167,65 @@ def get_macro_indicators():
     except Exception:
         pass
 
+    # Banco Central (IPCA 13522 e Meta Selic 432)
     try:
-        url_ipca = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.13522/dados/ultimos/1?formato=json"
-        r_ipca = requests.get(url_ipca, timeout=3)
+        r_ipca = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.13522/dados/ultimos/1?formato=json", timeout=3)
         if r_ipca.status_code == 200:
             data["ipca_12m"] = float(r_ipca.json()[0]["valor"])
+    except Exception:
+        pass
+
+    try:
+        r_selic = requests.get("https://api.bcb.gov.br/dados/serie/bcdata.sgs.432/dados/ultimos/1?formato=json", timeout=3)
+        if r_selic.status_code == 200:
+            data["selic_meta"] = float(r_selic.json()[0]["valor"])
     except Exception:
         pass
 
     return data
 
 @st.cache_data(ttl=900, show_spinner=False)
-def get_commodity_quotes():
-    tickers = {
-        "Milho B3": "CCM=F",
-        "Soja CBOT": "ZS=F",
-        "Petróleo Brent": "BZ=F"
+def get_market_assets():
+    """
+    Coleta indicadores do TradingView / Mercado Futuro:
+    - Petróleo WTI (CL=F)
+    - Ibovespa (^BVSP)
+    - Milho B3 (CCM=F)
+    - Soja CBOT (ZS=F)
+    - Farelo de Soja CBOT (ZM=F)
+    """
+    asset_map = {
+        "WTI": {"ticker": "CL=F", "def_price": 74.50},
+        "IBOV": {"ticker": "^BVSP", "def_price": 128500.0},
+        "MILHO_B3": {"ticker": "CCM=F", "def_price": 63.80},
+        "SOJA_CBOT": {"ticker": "ZS=F", "def_price": 104.20},
+        "FARELO_CBOT": {"ticker": "ZM=F", "def_price": 318.0},
     }
-    quotes = {}
-    for name, sym in tickers.items():
+    
+    results = {}
+    for key, info in asset_map.items():
         try:
-            t = yf.Ticker(sym)
+            t = yf.Ticker(info["ticker"])
             df = t.history(period="1mo")
             if not df.empty and len(df) >= 2:
                 last_p = float(df["Close"].iloc[-1])
                 prev_p = float(df["Close"].iloc[-2])
-                quotes[name] = {
-                    "price": last_p,
-                    "change": ((last_p - prev_p) / prev_p) * 100,
-                    "df": df
-                }
+                pct = ((last_p - prev_p) / prev_p) * 100.0
+                results[key] = {"price": last_p, "change": pct, "df": df}
             else:
-                quotes[name] = {"price": 63.10 if "Milho" in name else 105.0, "change": 0.0, "df": pd.DataFrame()}
+                results[key] = {"price": info["def_price"], "change": 0.0, "df": pd.DataFrame()}
         except Exception:
-            quotes[name] = {"price": 63.10 if "Milho" in name else 105.0, "change": 0.0, "df": pd.DataFrame()}
-    return quotes
+            results[key] = {"price": info["def_price"], "change": 0.0, "df": pd.DataFrame()}
+            
+    return results
 
 macro = get_macro_indicators()
-quotes = get_commodity_quotes()
+assets = get_market_assets()
+
+# Paridade Técnica do Sorgo Granífero (referência 82% do preço do Milho B3 por saca 60kg)
+milho_price = assets["MILHO_B3"]["price"]
+sorgo_price_saca = milho_price * 0.82
+sorgo_price_kg = sorgo_price_saca / 60.0
 
 # ==============================================================================
 # HEADER HERO HTML
@@ -236,9 +253,10 @@ menu = st.sidebar.radio(
         "⚖️ Custo Médio vs. Reposição",
         "🚚 Frete Inbound & Despesas CIF",
         "🎯 Formação de Preço & DRE",
+        "📉 Ponto de Equilíbrio (Break-Even)",
         "🌪️ Matriz de Sensibilidade (What-If)"
     ],
-    index=1
+    index=0
 )
 
 st.sidebar.markdown("---")
@@ -252,95 +270,144 @@ st.sidebar.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# MÓDULO 1: COCKPIT MACROECONÔMICO
+# MÓDULO 1: COCKPIT MACROECONÔMICO & COMMODITIES
 # ==============================================================================
 if menu == "📊 Cockpit Macroeconômico":
-    st.subheader("Indicadores Macroeconômicos e de Mercado Futuro")
-    
-    milho = quotes.get("Milho B3", {})
-    brent = quotes.get("Petróleo Brent", {})
+    st.subheader("Painel Macroeconômico, Risco e Mercado Futuro")
 
-    c1, c2, c3, c4 = st.columns(4)
+    # Linha 1: Moedas e Ativos Globais (WTI, Ibovespa, Selic)
+    st.markdown("##### 🌐 Moedas, Energia e Risco Brasil")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    
     with c1:
         st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">Dólar Comercial (USD)</div>
+        <div class="kpi-card" style="border-top-color: #047857;">
+            <div class="kpi-label">Dólar Comercial</div>
             <div class="kpi-value">R$ {macro['usd']:.4f}</div>
-            <div class="{'kpi-delta-pos' if macro['usd_pct'] >= 0 else 'kpi-delta-neg'}">{macro['usd_pct']:+.2f}% diário</div>
+            <div class="{'kpi-delta-pos' if macro['usd_pct'] >= 0 else 'kpi-delta-neg'}">{macro['usd_pct']:+.2f}% dia</div>
         </div>
         """, unsafe_allow_html=True)
-
     with c2:
         st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-label">Euro Comercial (EUR)</div>
+        <div class="kpi-card" style="border-top-color: #0284c7;">
+            <div class="kpi-label">Euro Comercial</div>
             <div class="kpi-value">R$ {macro['eur']:.4f}</div>
-            <div class="{'kpi-delta-pos' if macro['eur_pct'] >= 0 else 'kpi-delta-neg'}">{macro['eur_pct']:+.2f}% diário</div>
+            <div class="{'kpi-delta-pos' if macro['eur_pct'] >= 0 else 'kpi-delta-neg'}">{macro['eur_pct']:+.2f}% dia</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        wti_val = assets["WTI"]["price"]
+        wti_ch = assets["WTI"]["change"]
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #3b82f6;">
+            <div class="kpi-label">Petróleo WTI (CL1!)</div>
+            <div class="kpi-value">US$ {wti_val:.2f}</div>
+            <div class="{'kpi-delta-pos' if wti_ch >= 0 else 'kpi-delta-neg'}">{wti_ch:+.2f}% barril</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c4:
+        ibov_val = assets["IBOV"]["price"]
+        ibov_ch = assets["IBOV"]["change"]
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #6366f1;">
+            <div class="kpi-label">Ibovespa (IBOV)</div>
+            <div class="kpi-value">{ibov_val:,.0f}</div>
+            <div class="{'kpi-delta-pos' if ibov_ch >= 0 else 'kpi-delta-neg'}">{ibov_ch:+.2f}% pts</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c5:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #475569;">
+            <div class="kpi-label">Juros / Meta Selic (BR)</div>
+            <div class="kpi-value">{macro['selic_meta']:.2f}% a.a.</div>
+            <div class="kpi-delta-pos">IPCA 12M: {macro['ipca_12m']:.2f}%</div>
         </div>
         """, unsafe_allow_html=True)
 
-    with c3:
-        p_milho = milho.get("price", 0)
-        ch_milho = milho.get("change", 0)
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+    # Linha 2: Culturas Agrícolas (Milho B3, Soja CBOT, Farelo Soja, Sorgo)
+    st.markdown("##### 🌾 Culturas Agrícolas & Matérias-Primas Principais")
+    k_m1, k_m2, k_m3, k_m4 = st.columns(4)
+    with k_m1:
+        m_val = assets["MILHO_B3"]["price"]
+        m_ch = assets["MILHO_B3"]["change"]
         st.markdown(f"""
         <div class="kpi-card" style="border-top-color: #f59e0b;">
             <div class="kpi-label">Milho Futuro B3 (CCM=F)</div>
-            <div class="kpi-value">R$ {p_milho:.2f}</div>
-            <div class="{'kpi-delta-pos' if ch_milho >= 0 else 'kpi-delta-neg'}">{ch_milho:+.2f}% ref. saca 60kg</div>
+            <div class="kpi-value">R$ {m_val:.2f}</div>
+            <div class="{'kpi-delta-pos' if m_ch >= 0 else 'kpi-delta-neg'}">{m_ch:+.2f}% / sc 60kg (R$ {m_val/60:.3f}/kg)</div>
         </div>
         """, unsafe_allow_html=True)
-
-    with c4:
-        p_brent = brent.get("price", 0)
-        ch_brent = brent.get("change", 0)
+    with k_m2:
+        s_val = assets["SOJA_CBOT"]["price"]
+        s_ch = assets["SOJA_CBOT"]["change"]
         st.markdown(f"""
-        <div class="kpi-card" style="border-top-color: #3b82f6;">
-            <div class="kpi-label">Petróleo Brent (Diesel)</div>
-            <div class="kpi-value">US$ {p_brent:.2f}</div>
-            <div class="{'kpi-delta-pos' if ch_brent >= 0 else 'kpi-delta-neg'}">{ch_brent:+.2f}% barril</div>
+        <div class="kpi-card" style="border-top-color: #10b981;">
+            <div class="kpi-label">Soja Grão CBOT (ZS=F)</div>
+            <div class="kpi-value">US$ {s_val:.2f}</div>
+            <div class="{'kpi-delta-pos' if s_ch >= 0 else 'kpi-delta-neg'}">{s_ch:+.2f}% cents/bushel</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with k_m3:
+        f_val = assets["FARELO_CBOT"]["price"]
+        f_ch = assets["FARELO_CBOT"]["change"]
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #84cc16;">
+            <div class="kpi-label">Farelo de Soja CBOT (ZM=F)</div>
+            <div class="kpi-value">US$ {f_val:.1f}</div>
+            <div class="{'kpi-delta-pos' if f_ch >= 0 else 'kpi-delta-neg'}">{f_ch:+.2f}% / short ton</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with k_m4:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #eab308;">
+            <div class="kpi-label">Sorgo Granífero (Paridade)</div>
+            <div class="kpi-value">R$ {sorgo_price_saca:.2f}</div>
+            <div class="kpi-delta-pos">82% paridade milho (R$ {sorgo_price_kg:.3f}/kg)</div>
         </div>
         """, unsafe_allow_html=True)
 
-    col_g, col_inf = st.columns([2, 1])
-    with col_g:
-        df_milho = milho.get("df", pd.DataFrame())
+    # Gráfico de Tendências Cruzadas
+    col_chart1, col_chart2 = st.columns(2)
+    with col_chart1:
+        df_milho = assets["MILHO_B3"]["df"]
         if not df_milho.empty:
-            fig = px.area(df_milho, y="Close", title="Tendência do Milho B3 (Últimos 30 dias)", labels={"Close": "R$/saca", "Date": "Data"})
-            fig.update_traces(line_color="#047857", fillcolor="rgba(4, 120, 87, 0.1)")
-            fig.update_layout(height=360, margin=dict(l=20, r=20, t=40, b=20), plot_bgcolor="#ffffff")
-            st.plotly_chart(fig, use_container_width=True)
-    with col_inf:
-        st.markdown("""
-        <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:14px; padding:20px;">
-            <div style="font-weight:700; font-size:16px; margin-bottom:12px; color:#0f172a;">Indexadores Contratuais</div>
-            <div style="margin-bottom:15px;">
-                <div style="font-size:12px; color:#64748b;">IPCA ACUMULADO 12M</div>
-                <div style="font-size:24px; font-weight:800; color:#047857;">{}%</div>
-            </div>
-            <div>
-                <div style="font-size:12px; color:#64748b;">IGP-M DE REFERÊNCIA</div>
-                <div style="font-size:24px; font-weight:800; color:#0284c7;">{}%</div>
-            </div>
-            <div style="margin-top:15px; font-size:12px; color:#94a3b8; line-height:1.4;">
-                Índices consumidos diretamente das séries oficiais do SGS Banco Central do Brasil.
-            </div>
-        </div>
-        """.format(macro['ipca_12m'], macro['igpm_12m']), unsafe_allow_html=True)
+            fig_m = px.area(df_milho, y="Close", title="Tendência do Milho B3 (Últimos 30 dias)", labels={"Close": "R$/saca", "Date": "Data"})
+            fig_m.update_traces(line_color="#047857", fillcolor="rgba(4, 120, 87, 0.1)")
+            fig_m.update_layout(height=340, margin=dict(l=20, r=20, t=40, b=20), plot_bgcolor="#ffffff")
+            st.plotly_chart(fig_m, use_container_width=True)
+        else:
+            st.info("Série do Milho B3 em carregamento.")
+
+    with col_chart2:
+        df_wti = assets["WTI"]["df"]
+        if not df_wti.empty:
+            fig_w = px.line(df_wti, y="Close", title="Evolução do Petróleo WTI (Impacto Frete/Resinas)", labels={"Close": "US$/barril", "Date": "Data"})
+            fig_w.update_traces(line_color="#2563eb")
+            fig_w.update_layout(height=340, margin=dict(l=20, r=20, t=40, b=20), plot_bgcolor="#ffffff")
+            st.plotly_chart(fig_w, use_container_width=True)
+        else:
+            st.info("Série do Petróleo WTI em carregamento.")
 
 # ==============================================================================
-# MÓDULO 2: CUSTO MÉDIO VS. REPOSIÇÃO (BOM)
+# MÓDULO 2: CUSTO MÉDIO VS. REPOSIÇÃO (COM SORGO, MILHO E SOJA)
 # ==============================================================================
 elif menu == "⚖️ Custo Médio vs. Reposição":
     st.subheader("Auditoria de Ficha Técnica (BOM) e Custo de Reposição")
-    
+    st.write("Compare o custo contábil do estoque com as cotações spot de reposição.")
+
     preset = st.selectbox(
         "Selecione uma Linha de Ração Padrão:",
-        ["Frango de Corte Inicial", "Bovino Confinamento (Alto Grão)", "Suíno Terminação"]
+        ["Frango de Corte Inicial", "Bovino Confinamento (Alto Grão com Sorgo)", "Suíno Terminação"]
     )
+
+    milho_spot_kg = round(milho_price / 60.0, 3)
+    sorgo_spot_kg = round(sorgo_price_kg, 3)
 
     if preset == "Frango de Corte Inicial":
         items_data = [
-            {"ingrediente": "Milho Moído Fino", "inclusao": 58.0, "custo_medio_kg": 1.10, "custo_spot_kg": 1.22, "moeda": "BRL"},
+            {"ingrediente": "Milho Moído Fino", "inclusao": 58.0, "custo_medio_kg": 1.10, "custo_spot_kg": milho_spot_kg, "moeda": "BRL"},
             {"ingrediente": "Farelo de Soja 46%", "inclusao": 27.5, "custo_medio_kg": 2.05, "custo_spot_kg": 2.18, "moeda": "BRL"},
             {"ingrediente": "Farinha de Vísceras Aves", "inclusao": 5.5, "custo_medio_kg": 2.45, "custo_spot_kg": 2.65, "moeda": "BRL"},
             {"ingrediente": "Óleo de Soja Degomado", "inclusao": 2.5, "custo_medio_kg": 4.80, "custo_spot_kg": 5.10, "moeda": "BRL"},
@@ -348,16 +415,18 @@ elif menu == "⚖️ Custo Médio vs. Reposição":
             {"ingrediente": "L-Lisina HCl (USD)", "inclusao": 1.5, "custo_medio_kg": 2.15, "custo_spot_kg": 2.35, "moeda": "USD"},
             {"ingrediente": "DL-Metionina (USD)", "inclusao": 1.0, "custo_medio_kg": 3.70, "custo_spot_kg": 3.90, "moeda": "USD"}
         ]
-    elif preset == "Bovino Confinamento (Alto Grão)":
+    elif preset == "Bovino Confinamento (Alto Grão com Sorgo)":
         items_data = [
-            {"ingrediente": "Milho Grão Inteiro", "inclusao": 75.0, "custo_medio_kg": 1.12, "custo_spot_kg": 1.22, "moeda": "BRL"},
-            {"ingrediente": "Pellet Farelo de Soja", "inclusao": 12.0, "custo_medio_kg": 2.08, "custo_spot_kg": 2.18, "moeda": "BRL"},
+            {"ingrediente": "Milho Grão Inteiro", "inclusao": 45.0, "custo_medio_kg": 1.10, "custo_spot_kg": milho_spot_kg, "moeda": "BRL"},
+            {"ingrediente": "Sorgo Granífero Moído", "inclusao": 30.0, "custo_medio_kg": 0.92, "custo_spot_kg": sorgo_spot_kg, "moeda": "BRL"},
+            {"ingrediente": "Farelo de Soja 46%", "inclusao": 12.0, "custo_medio_kg": 2.05, "custo_spot_kg": 2.18, "moeda": "BRL"},
             {"ingrediente": "Caroço de Algodão", "inclusao": 8.0, "custo_medio_kg": 1.35, "custo_spot_kg": 1.45, "moeda": "BRL"},
-            {"ingrediente": "Núcleo Mineral Bovino", "inclusao": 5.0, "custo_medio_kg": 5.80, "custo_spot_kg": 6.10, "moeda": "BRL"}
+            {"ingrediente": "Núcleo Mineral Confinamento", "inclusao": 5.0, "custo_medio_kg": 5.80, "custo_spot_kg": 6.10, "moeda": "BRL"}
         ]
     else:
         items_data = [
-            {"ingrediente": "Milho Moído", "inclusao": 65.0, "custo_medio_kg": 1.10, "custo_spot_kg": 1.22, "moeda": "BRL"},
+            {"ingrediente": "Milho Moído", "inclusao": 45.0, "custo_medio_kg": 1.10, "custo_spot_kg": milho_spot_kg, "moeda": "BRL"},
+            {"ingrediente": "Sorgo Granífero", "inclusao": 20.0, "custo_medio_kg": 0.92, "custo_spot_kg": sorgo_spot_kg, "moeda": "BRL"},
             {"ingrediente": "Farelo de Soja 46%", "inclusao": 22.0, "custo_medio_kg": 2.05, "custo_spot_kg": 2.18, "moeda": "BRL"},
             {"ingrediente": "Farinha de Carne e Ossos", "inclusao": 6.0, "custo_medio_kg": 1.90, "custo_spot_kg": 2.05, "moeda": "BRL"},
             {"ingrediente": "Premix Suínos Terminação", "inclusao": 4.0, "custo_medio_kg": 8.50, "custo_spot_kg": 8.90, "moeda": "BRL"},
@@ -612,7 +681,153 @@ elif menu == "🎯 Formação de Preço & DRE":
     )
 
 # ==============================================================================
-# MÓDULO 5: MATRIZ DE SENSIBILIDADE
+# MÓDULO 5: PONTO DE EQUILÍBRIO (BREAK-EVEN)
+# ==============================================================================
+elif menu == "📉 Ponto de Equilíbrio (Break-Even)":
+    st.subheader("Análise de Ponto de Equilíbrio Operacional (Break-Even Point)")
+    st.write("Determine o volume de vendas e o faturamento mínimo para cobrir a estrutura fixa da fábrica.")
+
+    col_be1, col_be2 = st.columns(2)
+    with col_be1:
+        st.markdown("""
+        <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; margin-bottom:15px;">
+            <div style="font-weight:700; color:#0f172a; margin-bottom:12px;">Estrutura de Custos e Despesas Fixas (Mensal)</div>
+        """, unsafe_allow_html=True)
+        folha_fixa = st.number_input("Folha Salarial + Encargos (Indiretos/Admin) (R$)", 0.0, 2000000.0, 145000.0, 5000.0)
+        manutencao_fabril = st.number_input("Manutenção Preventiva & Predial Fixa (R$)", 0.0, 500000.0, 35000.0, 2000.0)
+        energia_demanda = st.number_input("Energia Elétrica (Demanda Contratada) (R$)", 0.0, 500000.0, 28000.0, 2000.0)
+        despesas_admin = st.number_input("Despesas Administrativas, TI e Seguros (R$)", 0.0, 500000.0, 42000.0, 2000.0)
+        depreciacao_maquinas = st.number_input("Depreciação de Máquinas e Galpões (R$)", 0.0, 500000.0, 30000.0, 2000.0)
+        custo_fixo_total = folha_fixa + manutencao_fabril + energia_demanda + despesas_admin + depreciacao_maquinas
+        st.markdown(f"**Custo Fixo Total Mensal:** `R$ {custo_fixo_total:,.2f}`")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_be2:
+        st.markdown("""
+        <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:12px; padding:18px; margin-bottom:15px;">
+            <div style="font-weight:700; color:#0f172a; margin-bottom:12px;">Parâmetros Unitários e Volume Atual</div>
+        """, unsafe_allow_html=True)
+        preco_venda_medio = st.number_input("Preço de Venda Faturado Médio (R$/ton)", 500.0, 6000.0, 2450.0, 50.0)
+        custo_variavel_ton = st.number_input("Custo Variável Unitário (CPV + Impostos + Frete) (R$/ton)", 300.0, 5000.0, 1980.0, 50.0)
+        volume_atual_fabrica = st.number_input("Volume Mensal Atual de Produção (Toneladas)", 100.0, 20000.0, 850.0, 50.0)
+        
+        margem_contrib_unit = preco_venda_medio - custo_variavel_ton
+        margem_contrib_ratio = (margem_contrib_unit / preco_venda_medio) if preco_venda_medio > 0 else 0
+        st.markdown(f"**Margem de Contribuição Unitária:** `R$ {margem_contrib_unit:,.2f}/ton` (`{margem_contrib_ratio*100:.1f}%`)")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if margem_contrib_unit > 0:
+        pe_toneladas = custo_fixo_total / margem_contrib_unit
+        pe_sacas_40kg = (pe_toneladas * 1000.0) / 40.0
+        pe_sacas_25kg = (pe_toneladas * 1000.0) / 25.0
+        pe_faturamento = pe_toneladas * preco_venda_medio
+        margem_seguranca_pct = ((volume_atual_fabrica - pe_toneladas) / volume_atual_fabrica) * 100.0
+    else:
+        pe_toneladas = 0.0
+        pe_sacas_40kg = 0.0
+        pe_sacas_25kg = 0.0
+        pe_faturamento = 0.0
+        margem_seguranca_pct = -100.0
+
+    st.markdown("### Indicadores do Ponto de Equilíbrio Operacional")
+    be1, be2, be3, be4 = st.columns(4)
+    with be1:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #047857;">
+            <div class="kpi-label">Ponto de Equilíbrio (PE)</div>
+            <div class="kpi-value">{pe_toneladas:,.1f} ton</div>
+            <div class="kpi-delta-pos">Volume mínimo de vendas</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with be2:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #0284c7;">
+            <div class="kpi-label">Sacas de 40 kg</div>
+            <div class="kpi-value">{pe_sacas_40kg:,.0f} sc</div>
+            <div class="kpi-delta-pos">ou {pe_sacas_25kg:,.0f} sc de 25kg</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with be3:
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: #f59e0b;">
+            <div class="kpi-label">Receita Mínima Mensal</div>
+            <div class="kpi-value">R$ {pe_faturamento:,.2f}</div>
+            <div class="kpi-delta-pos">Faturamento de cobertura</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with be4:
+        cor_seguranca = "#059669" if margem_seguranca_pct >= 0 else "#dc2626"
+        st.markdown(f"""
+        <div class="kpi-card" style="border-top-color: {cor_seguranca};">
+            <div class="kpi-label">Margem de Segurança</div>
+            <div class="kpi-value" style="color:{cor_seguranca};">{margem_seguranca_pct:+.1f}%</div>
+            <div class="{'kpi-delta-pos' if margem_seguranca_pct >= 0 else 'kpi-delta-neg'}">
+                {'Operação Superavitária' if margem_seguranca_pct >= 0 else 'Operação em Prejuízo'}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.subheader("Gráfico Interativo de Cruzamento Operacional")
+    
+    max_volume = max(volume_atual_fabrica, pe_toneladas) * 1.6
+    volume_axis = np.linspace(0, max_volume, 60)
+    receita_total = volume_axis * preco_venda_medio
+    custo_total = custo_fixo_total + (volume_axis * custo_variavel_ton)
+    custo_fixo_linha = np.full_like(volume_axis, custo_fixo_total)
+
+    fig_be = go.Figure()
+
+    fig_be.add_trace(go.Scatter(
+        x=volume_axis, y=custo_fixo_linha,
+        mode="lines", name="Custos Fixos",
+        line=dict(color="#64748b", width=2, dash="dash")
+    ))
+
+    fig_be.add_trace(go.Scatter(
+        x=volume_axis, y=custo_total,
+        mode="lines", name="Custos Totais (Fixo + Variável)",
+        line=dict(color="#dc2626", width=3)
+    ))
+
+    fig_be.add_trace(go.Scatter(
+        x=volume_axis, y=receita_total,
+        mode="lines", name="Receita Bruta Total",
+        line=dict(color="#047857", width=3)
+    ))
+
+    fig_be.add_trace(go.Scatter(
+        x=[pe_toneladas], y=[pe_faturamento],
+        mode="markers+text", name="Ponto de Equilíbrio",
+        marker=dict(color="#f59e0b", size=14, symbol="diamond"),
+        text=[f"  PE: {pe_toneladas:,.1f} ton"],
+        textposition="top left",
+        textfont=dict(color="#0f172a", size=12, family="Inter")
+    ))
+
+    receita_atual = volume_atual_fabrica * preco_venda_medio
+    fig_be.add_trace(go.Scatter(
+        x=[volume_atual_fabrica], y=[receita_atual],
+        mode="markers+text", name="Volume Atual de Produção",
+        marker=dict(color="#2563eb", size=12, symbol="circle"),
+        text=[f"  Atual: {volume_atual_fabrica:,.0f} ton"],
+        textposition="bottom right",
+        textfont=dict(color="#1d4ed8", size=12, family="Inter")
+    ))
+
+    fig_be.update_layout(
+        title="Curva de Equilíbrio Operacional: Receita vs. Custos Totais",
+        xaxis_title="Volume Faturado (Toneladas)",
+        yaxis_title="Montante Financeiro (R$)",
+        hovermode="x unified",
+        height=480,
+        plot_bgcolor="#ffffff",
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_be, use_container_width=True)
+
+# ==============================================================================
+# MÓDULO 6: MATRIZ DE SENSIBILIDADE
 # ==============================================================================
 elif menu == "🌪️ Matriz de Sensibilidade (What-If)":
     st.subheader("Matriz de Estresse de Portfólio (Milho vs. Dólar)")
@@ -637,7 +852,6 @@ elif menu == "🌪️ Matriz de Sensibilidade (What-If)":
         columns=[f"Milho {m:+d}%" for m in var_milho]
     )
 
-    # Renderização segura da tabela (funciona mesmo se matplotlib estiver compilando)
     try:
         st.dataframe(
             df_stress.style.format("R$ {:,.2f}").background_gradient(cmap="YlOrRd"),
@@ -649,7 +863,6 @@ elif menu == "🌪️ Matriz de Sensibilidade (What-If)":
             use_container_width=True
         )
 
-    # Botão de Exportação Excel
     excel_buf = io.BytesIO()
     with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
         df_stress.to_excel(writer, sheet_name="Matriz de Sensibilidade")
