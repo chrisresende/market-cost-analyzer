@@ -1,7 +1,17 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import os
+import sys
 
+# Garante a importação correta da pasta src em qualquer ambiente
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+# Imports agora usando o caminho das pastas
 from src.config import COMMODITY_TICKERS
 from src.integrations.market_apis import MarketDataService
 from src.calculations.cost_engine import FeedCostEngine
